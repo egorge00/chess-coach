@@ -34,30 +34,13 @@ The main coaching screen: interactive board, move-by-move feedback, voice contro
 - **LLM**: Mistral (chat + transcription)
 - **TTS**: Gradium
 
-## Architecture (simple)
+## Architecture
 
 - `main.py`
   - API endpoints (`/coach_move`, `/ask`, `/transcribe`, `/tts`)
   - Embedded web page (HTML/CSS/JS)
 - `start.command`
   - One-click macOS launcher (opens the browser automatically)
-
-## Features (detailed)
-
-- Move-by-move coaching:
-  - White move analysis
-  - Black response
-  - Practical next-step advice
-- Coach Q&A:
-  - text questions
-  - voice questions via microphone
-- Audio:
-  - TTS on/off toggle
-  - voice and speed settings
-- UX:
-  - clear mic states (ready / recording / transcribing)
-  - session log
-  - responsive desktop/mobile layout
 
 ## Local Setup
 
@@ -117,7 +100,7 @@ macOS one-click option:
 - API keys stay server-side (`os.getenv`)
 - `.env` is ignored by Git (`.gitignore`)
 - Fallback to a random legal move if an LLM Black move is invalid
-- The microphone stream is released after recording stops (important for the macOS mic indicator)
+- The microphone stream is released after recording stops
 
 ## Ideas / Next Steps
 
