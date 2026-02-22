@@ -97,14 +97,14 @@ def fallback_coach_response(
     return CoachMoveResponse(
         black_move_uci=random.choice(legal_moves_uci),
         white_feedback=white_feedback
-        or "Ton coup tient debout, mais le destin reclame encore plus de precision.",
-        black_advice="Respire, developpe une piece et garde ton roi en securite.",
+        or "Your move stands, but destiny still demands more precision.",
+        black_advice="Breathe, develop a piece, and keep your king safe.",
     )
 
 
 def call_mistral_chat(messages: list[dict], temperature: float = 0.7) -> str:
     if not MISTRAL_API_KEY:
-        raise HTTPException(status_code=500, detail="MISTRAL_API_KEY manquante")
+        raise HTTPException(status_code=500, detail="MISTRAL_API_KEY missing")
 
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
@@ -125,23 +125,23 @@ def call_mistral_chat(messages: list[dict], temperature: float = 0.7) -> str:
         payload_no_format.pop("response_format", None)
         resp2 = requests.post(url, headers=headers, json=payload_no_format, timeout=MISTRAL_TIMEOUT_SECONDS)
         if resp2.status_code >= 400:
-            detail = ascii_only(resp2.text)[:220] or ascii_only(resp.text)[:220] or "Erreur appel Mistral"
+            detail = ascii_only(resp2.text)[:220] or ascii_only(resp.text)[:220] or "Mistral call error"
             raise HTTPException(
                 status_code=502,
-                detail=f"Erreur appel Mistral ({resp2.status_code}): {detail}",
+                detail=f"Mistral call error ({resp2.status_code}): {detail}",
             )
         resp = resp2
 
     data = resp.json()
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
     if not content:
-        raise HTTPException(status_code=502, detail="Reponse Mistral vide")
+        raise HTTPException(status_code=502, detail="Empty Mistral response")
     return content
 
 
 def call_mistral_transcribe(filename: str, content_type: str, file_bytes: bytes) -> str:
     if not MISTRAL_API_KEY:
-        raise HTTPException(status_code=500, detail="MISTRAL_API_KEY manquante")
+        raise HTTPException(status_code=500, detail="MISTRAL_API_KEY missing")
 
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
     files = {
@@ -157,8 +157,8 @@ def call_mistral_transcribe(filename: str, content_type: str, file_bytes: bytes)
         timeout=MISTRAL_TIMEOUT_SECONDS,
     )
     if resp.status_code >= 400:
-        detail = ascii_only(resp.text)[:220] or "Erreur transcription"
-        raise HTTPException(status_code=502, detail=f"Erreur transcription ({resp.status_code}): {detail}")
+        detail = ascii_only(resp.text)[:220] or "Transcription error"
+        raise HTTPException(status_code=502, detail=f"Transcription error ({resp.status_code}): {detail}")
 
     payload = resp.json()
     text = payload.get("text") or payload.get("transcript") or ""
@@ -178,27 +178,27 @@ def index() -> str:
 @app.post("/coach_move", response_model=CoachMoveResponse)
 def coach_move(req: CoachMoveRequest) -> CoachMoveResponse:
     if not req.legal_moves_uci:
-        raise HTTPException(status_code=400, detail="legal_moves_uci vide")
+        raise HTTPException(status_code=400, detail="legal_moves_uci is empty")
 
     system_prompt = (
-        "Tu es un coach d'echecs DU COTE DES BLANCS (l'utilisateur). "
-        "Tu DOIS repondre en JSON strict, sans texte autour."
+        "You are a chess coach ON WHITE'S SIDE (the user). "
+        "You MUST answer in strict JSON, with no surrounding text."
     )
 
     white_feedback = ""
     try:
         # Step 1: evaluate white move only, without anticipating black's reply.
         feedback_prompt = (
-            "Contexte:\n"
+            "Context:\n"
             f"fen={req.fen}\n"
             f"last_move_uci={req.last_move_uci}\n\n"
-            "Regles obligatoires:\n"
-            "- Evalue UNIQUEMENT le coup blanc qui vient d'etre joue.\n"
-            "- N'anticipe PAS le coup noir a venir, ne mentionne aucun coup noir futur.\n"
-            "- white_feedback: 1 phrase max, francais oral, humour + dramatique, ASCII only, sans emoji.\n"
-            "- Utilise des criteres simples: securite du roi, centre, developpement, menaces tactiques, materiel.\n"
-            "- Evite le blabla: concret, specifique, pedagogique.\n\n"
-            "Format JSON strict attendu:\n"
+            "Required rules:\n"
+            "- Evaluate ONLY the White move that was just played.\n"
+            "- Do NOT anticipate Black's upcoming move and do not mention any future Black move.\n"
+            "- white_feedback: max 1 sentence, conversational English, humorous + dramatic, ASCII only, no emoji.\n"
+            "- Use simple criteria: king safety, center, development, tactical threats, material.\n"
+            "- Avoid fluff: be concrete, specific, and instructive.\n\n"
+            "Expected strict JSON format:\n"
             '{"white_feedback":"..."}'
         )
         raw_feedback = call_mistral_chat(
@@ -212,23 +212,23 @@ def coach_move(req: CoachMoveRequest) -> CoachMoveResponse:
         white_feedback = ascii_only(str(parsed_feedback.get("white_feedback", "")))
         white_feedback = re.split(r"(?<=[.!?])\s+", white_feedback)[0].strip()[:180]
         if not white_feedback:
-            white_feedback = "Ton coup est jouable, mais la tragedie guette chaque case oubliee."
+            white_feedback = "Your move is playable, but tragedy lurks behind every neglected square."
 
         # Step 2: choose black move and provide next-move advice for white.
         black_prompt = (
-            "Contexte:\n"
+            "Context:\n"
             f"fen={req.fen}\n"
             f"last_move_uci={req.last_move_uci}\n"
             f"elo={req.elo}\n"
             f"legal_moves_uci={json.dumps(req.legal_moves_uci, ensure_ascii=True)}\n\n"
-            "Regles obligatoires:\n"
-            "- Tu choisis un coup legal pour les NOIRS.\n"
-            "- black_move_uci doit etre EXACTEMENT un element de legal_moves_uci.\n"
-            "- Elo 800: parfois imprecis. Elo 1200: raisonnable. Elo 1600: plus solide et actif.\n"
-            "- black_advice: 1 phrase max, francais oral, humour + dramatique, ASCII only, sans emoji.\n"
-            "- black_advice doit aider les BLANCS sur leur PROCHAIN coup apres TON coup noir.\n"
-            "- Donne UNE action claire (developper, proteger, roquer, contester le centre, etc.).\n\n"
-            "Format JSON strict attendu:\n"
+            "Required rules:\n"
+            "- Choose a legal move for BLACK.\n"
+            "- black_move_uci must be EXACTLY one item from legal_moves_uci.\n"
+            "- Elo 800: sometimes imprecise. Elo 1200: reasonable. Elo 1600: more solid and active.\n"
+            "- black_advice: max 1 sentence, conversational English, humorous + dramatic, ASCII only, no emoji.\n"
+            "- black_advice must help WHITE on their NEXT move after YOUR Black move.\n"
+            "- Give ONE clear action (develop, defend, castle, contest the center, etc.).\n\n"
+            "Expected strict JSON format:\n"
             '{"black_move_uci":"...","black_advice":"..."}'
         )
         raw_black = call_mistral_chat(
@@ -245,7 +245,7 @@ def coach_move(req: CoachMoveRequest) -> CoachMoveResponse:
         if black_move not in req.legal_moves_uci:
             return fallback_coach_response(req.legal_moves_uci, white_feedback=white_feedback)
         if not black_advice:
-            black_advice = "Developpe une piece avec calme, et transforme ce chaos en plan."
+            black_advice = "Develop a piece calmly and turn this chaos into a plan."
 
         return CoachMoveResponse(
             black_move_uci=black_move,
@@ -265,15 +265,15 @@ def coach_move(req: CoachMoveRequest) -> CoachMoveResponse:
 def ask(req: AskRequest) -> AskResponse:
     question = ascii_only(req.question)
     if not question:
-        raise HTTPException(status_code=400, detail="question vide")
+        raise HTTPException(status_code=400, detail="empty question")
 
     system_prompt = (
-        "Tu es un coach d'echecs pedagogue. Reponds en francais, court, clair, ASCII only, sans emoji."
+        "You are a pedagogical chess coach. Answer in English, short, clear, ASCII only, no emoji."
     )
     user_prompt = (
         f"fen={req.fen}\n"
         f"question={question}\n"
-        "Contraintes: max 4 phrases, pas de variantes longues."
+        "Constraints: max 4 sentences, no long variations."
     )
 
     try:
@@ -305,16 +305,16 @@ def ask(req: AskRequest) -> AskResponse:
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(status_code=502, detail="Erreur reponse coach")
+        raise HTTPException(status_code=502, detail="Coach response error")
 
 
 @app.post("/transcribe")
 def transcribe(file: UploadFile = File(...)) -> dict:
     if not file.filename:
-        raise HTTPException(status_code=400, detail="fichier manquant")
+        raise HTTPException(status_code=400, detail="missing file")
     file_bytes = file.file.read()
     if not file_bytes:
-        raise HTTPException(status_code=400, detail="fichier vide")
+        raise HTTPException(status_code=400, detail="empty file")
 
     text = call_mistral_transcribe(file.filename, file.content_type or "audio/webm", file_bytes)
     return {"text": text}
@@ -323,11 +323,11 @@ def transcribe(file: UploadFile = File(...)) -> dict:
 @app.post("/tts")
 def tts(req: TTSRequest) -> Response:
     if not GRADIUM_API_KEY:
-        raise HTTPException(status_code=500, detail="GRADIUM_API_KEY manquante")
+        raise HTTPException(status_code=500, detail="GRADIUM_API_KEY missing")
 
     safe_text = ascii_only(req.text)
     if not safe_text:
-        raise HTTPException(status_code=400, detail="text vide")
+        raise HTTPException(status_code=400, detail="empty text")
 
     voice_id = (req.voice_id or "").strip()
     if not voice_id:
@@ -368,7 +368,7 @@ def tts(req: TTSRequest) -> Response:
                 + [{**p, "speaking_rate": speed} for p in payload_variants]
             )
 
-        last_error = "Erreur TTS"
+        last_error = "TTS error"
         for url in candidate_urls:
             for payload in payload_variants:
                 resp = requests.post(
@@ -379,7 +379,7 @@ def tts(req: TTSRequest) -> Response:
                 )
                 if resp.status_code >= 400:
                     body = ascii_only(resp.text)[:220]
-                    last_error = f"TTS {resp.status_code}: {body or 'reponse vide'}"
+                    last_error = f"TTS {resp.status_code}: {body or 'empty response'}"
                     continue
 
                 ctype = (resp.headers.get("content-type") or "").lower()
@@ -391,7 +391,7 @@ def tts(req: TTSRequest) -> Response:
                     try:
                         data = resp.json()
                     except ValueError:
-                        last_error = "TTS: JSON invalide"
+                        last_error = "TTS: invalid JSON"
                         continue
 
                     b64 = data.get("audio_base64") or data.get("audio")
@@ -399,7 +399,7 @@ def tts(req: TTSRequest) -> Response:
                         try:
                             audio_bytes = base64.b64decode(b64)
                         except Exception:
-                            last_error = "TTS: audio base64 invalide"
+                            last_error = "TTS: invalid base64 audio"
                             continue
                         return Response(content=audio_bytes, media_type="audio/wav")
 
@@ -412,16 +412,16 @@ def tts(req: TTSRequest) -> Response:
                         continue
 
                     msg = data.get("detail") or data.get("message") or data.get("error")
-                    last_error = f"TTS JSON sans audio: {ascii_only(str(msg or 'inconnu'))[:200]}"
+                    last_error = f"TTS JSON without audio: {ascii_only(str(msg or 'unknown'))[:200]}"
                     continue
 
-                last_error = f"TTS: format non supporte ({ctype or 'inconnu'})"
+                last_error = f"TTS: unsupported format ({ctype or 'unknown'})"
 
         raise HTTPException(status_code=502, detail=last_error)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Erreur TTS: {ascii_only(str(e))[:220]}")
+        raise HTTPException(status_code=502, detail=f"TTS error: {ascii_only(str(e))[:220]}")
 
 
 HTML_PAGE = """
@@ -944,11 +944,11 @@ HTML_PAGE = """
     <header class="app-header">
       <div class="title-block">
         <h1>Chess Coach</h1>
-        <p>Tu joues les blancs. Le coach commente ton coup, joue les noirs, puis te donne un plan simple.</p>
+        <p>You play White. The coach comments on your move, plays Black, then gives you a simple plan.</p>
       </div>
       <div class="status-strip">
-        <div id="turn-chip" class="chip"><span class="dot"></span><span>Trait: Blancs</span></div>
-        <div id="pending-chip" class="chip"><span class="dot"></span><span>Coach pret</span></div>
+        <div id="turn-chip" class="chip"><span class="dot"></span><span>Turn: White</span></div>
+        <div id="pending-chip" class="chip"><span class="dot"></span><span>Coach ready</span></div>
       </div>
     </header>
 
@@ -962,16 +962,16 @@ HTML_PAGE = """
             <div class="board-meta">
               <div class="board-state">
                 <div id="app-status" class="status-line">
-                  <small>Etat de session</small>
-                  <span>Chargement...</span>
+                  <small>Session status</small>
+                  <span>Loading...</span>
                 </div>
               </div>
-              <button id="reset-btn" class="secondary">Nouvelle partie</button>
+              <button id="reset-btn" class="secondary">New game</button>
             </div>
             <div class="board-controls">
               <div class="control-row">
                 <div class="control-group">
-                  <span>Niveau noirs</span>
+                  <span>Black strength</span>
                   <select id="elo">
                     <option value="800">800</option>
                     <option value="1200" selected>1200</option>
@@ -979,10 +979,10 @@ HTML_PAGE = """
                   </select>
                 </div>
                 <div class="control-group">
-                  <label><input type="checkbox" id="audio-toggle" checked> Voix coach</label>
+                  <label><input type="checkbox" id="audio-toggle" checked> Coach voice</label>
                 </div>
                 <div class="control-group">
-                  <label><input type="checkbox" id="theme-toggle"> Theme sombre</label>
+                  <label><input type="checkbox" id="theme-toggle"> Dark theme</label>
                 </div>
               </div>
             </div>
@@ -994,7 +994,7 @@ HTML_PAGE = """
         <div class="card">
           <div class="card-body">
             <div class="card-header">
-              <h2 class="card-title">Coach de coup</h2>
+              <h2 class="card-title">Move Coach</h2>
             </div>
             <div id="coach-commentary"></div>
             <div id="coach-history" class="coach-history"></div>
@@ -1004,16 +1004,16 @@ HTML_PAGE = """
         <div class="card">
           <div class="card-body">
             <div class="card-header">
-              <h2 class="card-title">Question Au Coach</h2>
+              <h2 class="card-title">Ask The Coach</h2>
             </div>
-            <p class="section-note">Tu peux taper ta question ou utiliser le micro. La transcription se lance automatiquement apres l'arret.</p>
-            <input id="ask-input" type="text" placeholder="Ex: Quel est mon plan ici ?" />
+            <p class="section-note">Type your question or use the microphone. Transcription starts automatically after you stop recording.</p>
+            <input id="ask-input" type="text" placeholder="Example: What is my plan here?" />
             <div class="ask-actions">
-              <button id="ask-btn">Envoyer la question</button>
-              <button id="mic-btn" title="Cliquer pour demarrer/arreter">Micro: demarrer</button>
+              <button id="ask-btn">Send question</button>
+              <button id="mic-btn" title="Click to start/stop">Mic: start</button>
             </div>
             <div class="mic-status-row">
-              <div id="mic-state" class="mic-pill ready"><span class="dot"></span><span>Micro pret</span></div>
+              <div id="mic-state" class="mic-pill ready"><span class="dot"></span><span>Mic ready</span></div>
               <div id="mic-timer" class="mic-pill mic-timer"><span>00:00</span></div>
             </div>
             <div style="height:10px"></div>
@@ -1025,19 +1025,19 @@ HTML_PAGE = """
           <div class="card-body">
             <details class="audio-details">
               <summary>
-                <span>Reglages audio (Gradium)</span>
-                <span class="summary-right">Voix, vitesse, test</span>
+                <span>Audio settings (Gradium)</span>
+                <span class="summary-right">Voice, speed, test</span>
               </summary>
               <div class="details-body">
-                <p class="section-note">Ces reglages n'affectent que la voix du coach (TTS). Les cles API restent cote serveur.</p>
+                <p class="section-note">These settings only affect the coach voice (TTS). API keys stay server-side.</p>
                 <div class="voice-grid">
                   <select id="voice-black-select"></select>
                   <select id="voice-speed-select"></select>
-                  <input id="voice-black-custom" type="text" placeholder="voice_id coach personnalise" style="display:none" />
+                  <input id="voice-black-custom" type="text" placeholder="custom coach voice_id" style="display:none" />
                 </div>
                 <div class="voice-actions">
-                  <button id="voice-save-btn" class="secondary">Sauver voix</button>
-                  <button id="voice-test-btn">Tester voix coach</button>
+                  <button id="voice-save-btn" class="secondary">Save voice</button>
+                  <button id="voice-test-btn">Test coach voice</button>
                 </div>
               </div>
             </details>
@@ -1047,7 +1047,7 @@ HTML_PAGE = """
         <div class="card">
           <div class="card-body">
             <div class="card-header">
-              <h2 class="card-title">Journal De Session</h2>
+              <h2 class="card-title">Session Log</h2>
             </div>
             <div id="log"></div>
           </div>
@@ -1088,7 +1088,7 @@ HTML_PAGE = """
     const voiceSaveBtn = document.getElementById('voice-save-btn');
     const voiceTestBtn = document.getElementById('voice-test-btn');
     const VOICE_OPTIONS = [
-      { value: '', label: 'Defaut serveur' },
+      { value: '', label: 'Server default' },
       { value: 'YTpq7expH9539ERJ', label: 'Emma (en-US, feminine)' },
       { value: 'LFZvm12tW_z0xfGo', label: 'Kent (en-US, masculine)' },
       { value: 'jtEKaLYNn6iif5PR', label: 'Sydney (en-US, feminine)' },
@@ -1103,12 +1103,12 @@ HTML_PAGE = """
       { value: 'xu7iJ_fn2ElcWp2s', label: 'Sergio (es-ES, masculine)' },
       { value: 'pYcGZz9VOo4n2ynh', label: 'Alice (pt-BR, feminine)' },
       { value: 'M-FvVo9c-jGR4PgP', label: 'Davi (pt-BR, masculine)' },
-      { value: '__custom__', label: 'Personnalisee...' }
+      { value: '__custom__', label: 'Custom...' }
     ];
     const SPEED_OPTIONS = [
-      { value: '1.0', label: 'Vitesse: normal' },
-      { value: '1.15', label: 'Vitesse: rapide' },
-      { value: '1.3', label: 'Vitesse: tres rapide' },
+      { value: '1.0', label: 'Speed: normal' },
+      { value: '1.15', label: 'Speed: fast' },
+      { value: '1.3', label: 'Speed: very fast' },
     ];
 
     const chess = new Chess();
@@ -1156,8 +1156,8 @@ HTML_PAGE = """
     }
 
     function updateTurnChip() {
-      const turn = chess.turn() === 'w' ? 'Blancs' : 'Noirs';
-      setChip(turnChipEl, `Trait: ${turn}`, chess.turn() === 'w' ? 'ok' : 'busy');
+      const turn = chess.turn() === 'w' ? 'White' : 'Black';
+      setChip(turnChipEl, `Turn: ${turn}`, chess.turn() === 'w' ? 'ok' : 'busy');
     }
 
     function formatMicTimer(ms) {
@@ -1206,9 +1206,9 @@ HTML_PAGE = """
         micBtn.classList.remove('danger-soft', 'secondary');
         if (kind === 'recording') {
           micBtn.classList.add('danger-soft');
-          micBtn.textContent = 'Micro: arreter';
+          micBtn.textContent = 'Mic: stop';
         } else {
-          micBtn.textContent = 'Micro: demarrer';
+          micBtn.textContent = 'Mic: start';
         }
       }
     }
@@ -1292,15 +1292,15 @@ HTML_PAGE = """
       const cards = [
         {
           key: 'white_feedback',
-          label: 'Ton coup (analyse)',
-          empty: 'Joue un coup avec les blancs pour recevoir un premier retour.',
+          label: 'Your move (analysis)',
+          empty: 'Play a move as White to get your first coach feedback.',
           value: coachState.white_feedback,
           className: 'coach-white',
         },
         {
           key: 'black_advice',
-          label: 'Plan conseille (apres la reponse noire)',
-          empty: 'Le coach donnera ici une action simple pour ton prochain coup.',
+          label: 'Suggested plan (after Black reply)',
+          empty: 'The coach will suggest one simple action for your next move here.',
           value: coachState.black_advice,
           className: 'coach-plan',
         },
@@ -1333,7 +1333,7 @@ HTML_PAGE = """
       if (!coachHistory.length) {
         const empty = document.createElement('div');
         empty.className = 'history-item';
-        empty.textContent = 'Historique: les 3 derniers conseils apparaitront ici.';
+        empty.textContent = 'History: your last 3 coach tips will appear here.';
         coachHistoryEl.appendChild(empty);
         return;
       }
@@ -1423,7 +1423,7 @@ HTML_PAGE = """
       if (currentVoiceId && !known.has(currentVoiceId)) {
         const customOpt = document.createElement('option');
         customOpt.value = currentVoiceId;
-        customOpt.textContent = `Personnalisee (${currentVoiceId.slice(0, 8)}...)`;
+        customOpt.textContent = `Custom (${currentVoiceId.slice(0, 8)}...)`;
         selectEl.insertBefore(customOpt, selectEl.lastElementChild);
         selectEl.value = currentVoiceId;
         customInputEl.style.display = 'none';
@@ -1457,7 +1457,7 @@ HTML_PAGE = """
         speed: Number(voiceSpeedSelect.value || '1.0') || 1.0,
       };
       localStorage.setItem('gradium_voice_settings', JSON.stringify(voiceSettings));
-      log('Reglages voix sauvegardes');
+      log('Voice settings saved');
     }
 
     async function playTTS(text, color) {
@@ -1474,7 +1474,7 @@ HTML_PAGE = """
           })
         });
         if (!resp.ok) {
-          let detail = 'Erreur TTS';
+          let detail = 'TTS error';
           try {
             const data = await resp.json();
             if (data && data.detail) detail = String(data.detail);
@@ -1500,7 +1500,7 @@ HTML_PAGE = """
             if (settled) return;
             settled = true;
             URL.revokeObjectURL(url);
-            reject(new Error('lecture audio impossible'));
+            reject(new Error('audio playback failed'));
           };
           audio.play().catch((err) => {
             if (settled) return;
@@ -1510,7 +1510,7 @@ HTML_PAGE = """
           });
         });
       } catch (e) {
-        log(`TTS Gradium indisponible: ${e && e.message ? e.message : 'erreur inconnue'}`);
+        log(`Gradium TTS unavailable: ${e && e.message ? e.message : 'unknown error'}`);
       }
     }
 
@@ -1525,8 +1525,8 @@ HTML_PAGE = """
 
     async function onWhiteMoveApplied(lastMoveUci) {
       pending = true;
-      setAppStatus('Le coach analyse ton coup et prepare la reponse noire...', 'busy');
-      setChip(pendingChipEl, 'Coach en analyse', 'busy');
+      setAppStatus('Coach is analyzing your move and preparing Black reply...', 'busy');
+      setChip(pendingChipEl, 'Coach thinking', 'busy');
       try {
         const payload = {
           fen: chess.fen(),
@@ -1542,7 +1542,7 @@ HTML_PAGE = """
         });
 
         if (!resp.ok) {
-          let detail = 'Erreur coach';
+          let detail = 'Coach error';
           try {
             const data = await resp.json();
             if (data && data.detail) detail = String(data.detail);
@@ -1563,27 +1563,27 @@ HTML_PAGE = """
         });
 
         if (!black) {
-          log('Coup noir invalide recu.');
+          log('Received invalid Black move.');
         } else {
           lastMoveSquares = { from: black.from, to: black.to };
           renderBoard();
-          log(`Noirs: ${toUci(black)}`);
+          log(`Black: ${toUci(black)}`);
           setCoachBlackAdvice(data.black_advice || '');
           await playTTS(data.black_advice || '', 'black');
         }
       } catch (e) {
-        log(`Coach indisponible: ${e && e.message ? e.message : 'erreur inconnue'}`);
-        setCoachWhiteFeedback('Erreur, reessaie');
-        setAppStatus('Erreur coach. Reessaie un coup ou relance le serveur.', 'error');
+        log(`Coach unavailable: ${e && e.message ? e.message : 'unknown error'}`);
+        setCoachWhiteFeedback('Error, please try again.');
+        setAppStatus('Coach error. Try another move or restart the server.', 'error');
       } finally {
         selectedSquare = null;
         refreshLegalTargets();
         pending = false;
         renderBoard();
-        if (!coachState.white_feedback.startsWith('Erreur')) {
-          setAppStatus('A toi de jouer: applique le conseil ou pose une question au coach.');
+        if (!coachState.white_feedback.startsWith('Error')) {
+          setAppStatus('Your turn: apply the tip or ask the coach a question.');
         }
-        setChip(pendingChipEl, 'Coach pret', 'ok');
+        setChip(pendingChipEl, 'Coach ready', 'ok');
       }
     }
 
@@ -1620,7 +1620,7 @@ HTML_PAGE = """
       }
 
       const whiteUci = toUci(move);
-      log(`Blancs: ${whiteUci}`);
+      log(`White: ${whiteUci}`);
       lastMoveSquares = { from: whiteUci.slice(0, 2), to: whiteUci.slice(2, 4) };
       selectedSquare = null;
       refreshLegalTargets();
@@ -1633,8 +1633,8 @@ HTML_PAGE = """
       if (!clean) return;
 
       askAnswerEl.textContent = '...';
-       setChip(pendingChipEl, 'Question en cours', 'busy');
-       setAppStatus('Le coach prepare une reponse courte a ta question...', 'busy');
+       setChip(pendingChipEl, 'Answering question', 'busy');
+       setAppStatus('Coach is preparing a short answer to your question...', 'busy');
       try {
         const resp = await fetch('/ask', {
           method: 'POST',
@@ -1646,12 +1646,12 @@ HTML_PAGE = """
         const data = await resp.json();
         askAnswerEl.textContent = data.answer || '';
         await playTTS(data.answer || '', 'black');
-        setAppStatus('Reponse coach disponible. Tu peux jouer ou poser une autre question.');
+        setAppStatus('Coach answer ready. You can play or ask another question.');
       } catch (_) {
-        askAnswerEl.textContent = 'Erreur question coach';
-        setAppStatus('Erreur question coach. Reessaie dans quelques secondes.', 'error');
+        askAnswerEl.textContent = 'Coach question error';
+        setAppStatus('Coach question error. Try again in a few seconds.', 'error');
       } finally {
-        setChip(pendingChipEl, 'Coach pret', 'ok');
+        setChip(pendingChipEl, 'Coach ready', 'ok');
       }
     }
 
@@ -1667,9 +1667,9 @@ HTML_PAGE = """
       refreshLegalTargets();
       resetCoach();
       askAnswerEl.textContent = '';
-      setAppStatus('Nouvelle partie. Tu joues les blancs.');
-      setChip(pendingChipEl, 'Coach pret', 'ok');
-      log('Nouvelle partie');
+      setAppStatus('New game. You play White.');
+      setChip(pendingChipEl, 'Coach ready', 'ok');
+      log('New game');
       renderBoard();
     });
 
@@ -1682,14 +1682,14 @@ HTML_PAGE = """
     voiceSaveBtn.addEventListener('click', saveVoiceSettings);
     voiceTestBtn.addEventListener('click', async () => {
       saveVoiceSettings();
-      await playTTS('Test de la voix du coach.', 'black');
+      await playTTS('Coach voice test.', 'black');
     });
 
     async function ensureRecorder() {
       if (mediaRecorder) return true;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        log('Micro non supporte');
-        setMicState('ready', 'Micro non supporte');
+        log('Microphone not supported');
+        setMicState('ready', 'Microphone not supported');
         return false;
       }
       try {
@@ -1709,7 +1709,7 @@ HTML_PAGE = """
           chunks = [];
           if (!blob.size) {
             stopMicTimer();
-            setMicState('ready', 'Micro pret');
+            setMicState('ready', 'Mic ready');
             return;
           }
 
@@ -1718,32 +1718,32 @@ HTML_PAGE = """
 
           try {
             stopMicTimer();
-            setMicState('busy', 'Transcription...');
-            setAppStatus('Transcription de ta question...', 'busy');
+            setMicState('busy', 'Transcribing...');
+            setAppStatus('Transcribing your question...', 'busy');
             const tr = await fetch('/transcribe', { method: 'POST', body: form });
             if (!tr.ok) throw new Error('transcribe error');
             const data = await tr.json();
             const text = (data.text || '').trim();
             if (!text) {
-              log('Transcription vide');
-              setMicState('ready', 'Micro pret');
-              setAppStatus('Transcription vide. Reessaie avec une question plus courte.');
+              log('Empty transcription');
+              setMicState('ready', 'Mic ready');
+              setAppStatus('Empty transcription. Try again with a shorter question.');
               return;
             }
             askInput.value = text;
-            setMicState('busy', 'Question au coach...');
+            setMicState('busy', 'Sending to coach...');
             await askCoach(text);
-            setMicState('ready', 'Micro pret');
+            setMicState('ready', 'Mic ready');
           } catch (_) {
-            log('Erreur micro/transcription');
-            setMicState('ready', 'Micro pret');
-            setAppStatus('Erreur micro/transcription. Reessaie.', 'error');
+            log('Microphone/transcription error');
+            setMicState('ready', 'Mic ready');
+            setAppStatus('Microphone/transcription error. Try again.', 'error');
           }
         };
         return true;
       } catch (_) {
-        log('Acces micro refuse');
-        setMicState('ready', 'Acces micro refuse');
+        log('Microphone access denied');
+        setMicState('ready', 'Microphone access denied');
         return false;
       }
     }
@@ -1754,10 +1754,10 @@ HTML_PAGE = """
       if (mediaRecorder.state === 'inactive') {
         chunks = [];
         mediaRecorder.start();
-        log('Enregistrement...');
+        log('Recording...');
         startMicTimer();
-        setMicState('recording', 'Enregistrement...');
-        setAppStatus('Enregistrement micro en cours. Clique pour arreter.', 'busy');
+        setMicState('recording', 'Recording...');
+        setAppStatus('Microphone recording in progress. Click to stop.', 'busy');
       }
     }
 
@@ -1765,8 +1765,8 @@ HTML_PAGE = """
       if (!mediaRecorder) return;
       if (mediaRecorder.state === 'recording') {
         mediaRecorder.stop();
-        log('Enregistrement stop');
-        setMicState('busy', 'Arret en cours...');
+        log('Recording stopped');
+        setMicState('busy', 'Stopping...');
       } else if (mediaRecorder.state === 'inactive') {
         // Cleanup stale recorder instance if it exists.
         try {
@@ -1776,7 +1776,7 @@ HTML_PAGE = """
         }
         mediaRecorder = null;
         stopMicTimer();
-        setMicState('ready', 'Micro pret');
+        setMicState('ready', 'Mic ready');
       }
     }
 
@@ -1794,10 +1794,10 @@ HTML_PAGE = """
     renderVoiceSettings();
     renderCoach();
     renderBoard();
-    setMicState('ready', 'Micro pret');
-    setChip(pendingChipEl, 'Coach pret', 'ok');
-    setAppStatus('Pret. Tu joues les blancs.');
-    log('Pret. Tu joues les blancs.');
+    setMicState('ready', 'Mic ready');
+    setChip(pendingChipEl, 'Coach ready', 'ok');
+    setAppStatus('Ready. You play White.');
+    log('Ready. You play White.');
   </script>
 </body>
 </html>

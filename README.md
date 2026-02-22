@@ -21,7 +21,7 @@ I wanted a fast prototype for chess coaching with:
 
 ## Screenshots
 
-Add your images to `docs/screenshots/`, then replace the placeholders below.
+Add your images to `docs/screenshots/`.
 
 Recommended structure:
 
@@ -33,14 +33,14 @@ docs/
     coach-answer.png
 ```
 
-You can use this block as-is once your images are added:
+### Main UI
+The main coaching screen: interactive board, move-by-move feedback, voice controls, and question panel.
+
+![Chess Coach main UI](docs/screenshots/hero-ui.png)
+
+### More screenshots (optional)
 
 ```md
-## Screenshots
-
-### Main UI
-![Main UI](docs/screenshots/hero-ui.png)
-
 ### Microphone recording
 ![Microphone recording](docs/screenshots/mic-recording.png)
 
