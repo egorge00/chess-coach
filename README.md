@@ -21,39 +21,10 @@ I wanted a fast prototype for chess coaching with:
 
 ## Screenshots
 
-Add your images to `docs/screenshots/`.
-
-Recommended structure:
-
-```text
-docs/
-  screenshots/
-    hero-ui.png
-    mic-recording.png
-    coach-answer.png
-```
-
 ### Main UI
 The main coaching screen: interactive board, move-by-move feedback, voice controls, and question panel.
 
 ![Chess Coach main UI](docs/screenshots/hero-ui.png)
-
-### More screenshots (optional)
-
-```md
-### Microphone recording
-![Microphone recording](docs/screenshots/mic-recording.png)
-
-### Coach answer
-![Coach answer](docs/screenshots/coach-answer.png)
-```
-
-Optional bonus (if you create a GIF):
-
-```md
-### Quick demo (GIF)
-![Demo GIF](docs/screenshots/demo.gif)
-```
 
 ## Tech Stack
 
