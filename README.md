@@ -17,7 +17,7 @@ I wanted a fast prototype for chess coaching with:
 - Black reply selected by an LLM
 - Clear next-move advice
 - Free-form questions to the coach (text or microphone)
-- Audio playback of coach responses (Gradium TTS)
+- Audio playback of coach responses (Pocket TTS by Kyutai)
 
 ## Screenshots
 
@@ -31,8 +31,9 @@ The main coaching screen: interactive board, move-by-move feedback, voice contro
 - **Backend**: FastAPI (Python)
 - **Frontend**: Single-page HTML / CSS / vanilla JS
 - **Chess logic**: `chess.js`
-- **LLM**: Mistral (chat + transcription)
-- **TTS**: Gradium
+- **Realtime voice orchestration**: Pipecat
+- **LLM / STT**: Mistral + Voxtral (chat + transcription)
+- **TTS**: Pocket TTS (Kyutai, local)
 
 ## Architecture
 
@@ -48,7 +49,7 @@ The main coaching screen: interactive board, move-by-move feedback, voice contro
 
 - Python 3.10+ (3.9 may also work depending on your environment)
 - A Mistral API key
-- A Gradium API key
+- Pocket TTS (Kyutai) running locally for voice output
 
 ### Environment variables
 
@@ -56,9 +57,9 @@ Copy `.env.example` to `.env` and fill in:
 
 ```bash
 MISTRAL_API_KEY="<your_mistral_key>"
-GRADIUM_API_KEY="<your_gradium_key>"
-# Optional: eu (default) or us
-GRADIUM_REGION="eu"
+LOCAL_TTS_URL="http://127.0.0.1:8787"
+# Optional local Pocket TTS voice preset
+# LOCAL_TTS_VOICE="alba"
 ```
 
 ### Installation
@@ -101,10 +102,3 @@ macOS one-click option:
 - `.env` is ignored by Git (`.gitignore`)
 - Fallback to a random legal move if an LLM Black move is invalid
 - The microphone stream is released after recording stops
-
-## Ideas / Next Steps
-
-- Game history (PGN)
-- Training modes (openings / tactics)
-- End-of-game debrief
-- Public deployment (shareable demo)
