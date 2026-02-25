@@ -1,0 +1,1 @@
+In D3, consider developing your knight to f3. This move controls the center and prepares for kingside castling.

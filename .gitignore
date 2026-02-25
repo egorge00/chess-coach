@@ -3,3 +3,7 @@
 .venv/
 __pycache__/
 .DS_Store
+.pocket-tts.log
+.pipecat-poc-web.log
+pipecat_poc/.venv/
+pipecat_poc/config.env

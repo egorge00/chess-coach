@@ -1,0 +1,1 @@
+Your queen on d3 is misplaced. Move it back to d1 to connect the rooks and prepare for development.

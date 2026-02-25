@@ -1,0 +1,1 @@
+Yes, moving the knight from H2 to H4 is a reasonable developing move. It prepares to control the center and potentially supports a pawn advance like d2-d4.

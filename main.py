@@ -7,6 +7,10 @@ Optional for explicit Gradium voices:
 - GRADIUM_VOICE_ID_WHITE
 - GRADIUM_VOICE_ID_BLACK
 
+Optional local TTS (e.g. pocket-tts):
+- LOCAL_TTS_URL (example: http://127.0.0.1:8787)
+- LOCAL_TTS_VOICE (optional local voice name/file)
+
 Run locally:
 uvicorn main:app --reload
 """
@@ -14,6 +18,7 @@ uvicorn main:app --reload
 import base64
 import io
 import json
+import logging
 import os
 import random
 import re
@@ -26,13 +31,23 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Chess Coach POC")
+logger = logging.getLogger("chess_coach")
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 GRADIUM_API_KEY = os.getenv("GRADIUM_API_KEY", "").strip()
 GRADIUM_REGION = os.getenv("GRADIUM_REGION", "eu").strip().lower()
+LOCAL_TTS_URL = (
+    os.getenv("LOCAL_TTS_URL", "").strip()
+    or os.getenv("POCKET_TTS_URL", "").strip()
+).rstrip("/")
+LOCAL_TTS_VOICE = (
+    os.getenv("LOCAL_TTS_VOICE", "").strip()
+    or os.getenv("POCKET_TTS_VOICE", "").strip()
+)
 MISTRAL_CHAT_MODEL = "mistral-small-latest"
 MISTRAL_TRANSCRIBE_MODEL = "voxtral-mini-latest"
 MISTRAL_TIMEOUT_SECONDS = 20
+LOCAL_TTS_TIMEOUT_SECONDS = 20
 
 # Keep these constant per requirement.
 # Public sample voice shown in Gradium docs.
@@ -75,6 +90,130 @@ def ascii_only(text: str) -> str:
     encoded = normalized.encode("ascii", "ignore").decode("ascii")
     encoded = re.sub(r"\s+", " ", encoded).strip()
     return encoded
+
+
+def _extract_audio_from_tts_http_response(resp: requests.Response) -> tuple[Optional[bytes], str]:
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if "audio/wav" in ctype or "audio/" in ctype:
+        return resp.content, ""
+
+    if "application/json" in ctype:
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, "TTS: invalid JSON"
+
+        b64 = data.get("audio_base64") or data.get("audio")
+        if isinstance(b64, str) and b64.strip():
+            try:
+                return base64.b64decode(b64), ""
+            except Exception:
+                return None, "TTS: invalid base64 audio"
+
+        audio_url = data.get("audio_url")
+        if isinstance(audio_url, str) and audio_url.startswith("http"):
+            get_resp = requests.get(audio_url, timeout=20)
+            if get_resp.status_code < 400:
+                return get_resp.content, ""
+            return None, f"TTS audio_url {get_resp.status_code}"
+
+        msg = data.get("detail") or data.get("message") or data.get("error")
+        return None, f"TTS JSON without audio: {ascii_only(str(msg or 'unknown'))[:200]}"
+
+    return None, f"TTS: unsupported format ({ctype or 'unknown'})"
+
+
+def _call_local_tts(
+    safe_text: str,
+    speed: Optional[float],
+    voice_override: Optional[str] = None,
+) -> Response:
+    if not LOCAL_TTS_URL:
+        raise HTTPException(status_code=500, detail="LOCAL_TTS_URL not configured")
+
+    # Keep local mode independent from Gradium voice ids stored in the UI.
+    voice = ascii_only((voice_override or "").strip()) or LOCAL_TTS_VOICE.strip()
+
+    endpoint_candidates = [LOCAL_TTS_URL]
+    if not LOCAL_TTS_URL.endswith("/tts"):
+        endpoint_candidates.append(f"{LOCAL_TTS_URL}/tts")
+    if not LOCAL_TTS_URL.endswith("/generate"):
+        endpoint_candidates.append(f"{LOCAL_TTS_URL}/generate")
+    if not LOCAL_TTS_URL.endswith("/v1/audio/speech"):
+        endpoint_candidates.append(f"{LOCAL_TTS_URL}/v1/audio/speech")
+
+    endpoint_candidates = list(dict.fromkeys(endpoint_candidates))
+
+    # pocket-tts serve expects POST /tts with form fields:
+    # - text (required)
+    # - voice_url (optional, supports predefined voice names like "alba")
+    form_payloads: list[dict] = [{"text": safe_text}]
+    if voice:
+        form_payloads = [
+            {"text": safe_text, "voice_url": voice},
+            {"text": safe_text},
+        ]
+
+    json_payloads: list[dict] = [
+        {"text": safe_text},
+        {"input": safe_text},
+        {"input": safe_text, "model": "pocket-tts"},
+    ]
+    if voice:
+        json_payloads = (
+            [{**p, "voice": voice} for p in json_payloads]
+            + [{**p, "voice_id": voice} for p in json_payloads]
+            + json_payloads
+        )
+    if speed is not None:
+        json_payloads = (
+            [{**p, "speed": speed} for p in json_payloads]
+            + [{**p, "speaking_rate": speed} for p in json_payloads]
+            + json_payloads
+        )
+    json_payloads = [dict(p) for p in {json.dumps(p, sort_keys=True): p for p in json_payloads}.values()]
+
+    last_error = "Local TTS error"
+    for url in endpoint_candidates:
+        payload_attempts: list[dict] = []
+        if url.endswith("/tts"):
+            payload_attempts.extend({"kind": "form", "payload": p} for p in form_payloads)
+        payload_attempts.extend({"kind": "json", "payload": p} for p in json_payloads)
+
+        for attempt in payload_attempts:
+            try:
+                if attempt["kind"] == "form":
+                    resp = requests.post(
+                        url,
+                        headers={"Accept": "audio/wav, audio/*, application/json"},
+                        data=attempt["payload"],
+                        timeout=LOCAL_TTS_TIMEOUT_SECONDS,
+                    )
+                else:
+                    resp = requests.post(
+                        url,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Accept": "audio/wav, audio/*, application/json",
+                        },
+                        json=attempt["payload"],
+                        timeout=LOCAL_TTS_TIMEOUT_SECONDS,
+                    )
+            except requests.RequestException as e:
+                last_error = f"Local TTS connection error: {ascii_only(str(e))[:220]}"
+                continue
+
+            if resp.status_code >= 400:
+                body = ascii_only(resp.text)[:220]
+                last_error = f"Local TTS {resp.status_code}: {body or 'empty response'}"
+                continue
+
+            audio_bytes, parse_error = _extract_audio_from_tts_http_response(resp)
+            if audio_bytes:
+                return Response(content=audio_bytes, media_type="audio/wav")
+            last_error = parse_error or "Local TTS: no audio returned"
+
+    raise HTTPException(status_code=502, detail=last_error)
 
 
 def extract_json_object(text: str) -> dict:
@@ -322,9 +461,6 @@ def transcribe(file: UploadFile = File(...)) -> dict:
 
 @app.post("/tts")
 def tts(req: TTSRequest) -> Response:
-    if not GRADIUM_API_KEY:
-        raise HTTPException(status_code=500, detail="GRADIUM_API_KEY missing")
-
     safe_text = ascii_only(req.text)
     if not safe_text:
         raise HTTPException(status_code=400, detail="empty text")
@@ -335,6 +471,16 @@ def tts(req: TTSRequest) -> Response:
     speed = req.speed
     if speed is not None:
         speed = max(0.5, min(2.0, float(speed)))
+
+    if LOCAL_TTS_URL:
+        try:
+            return _call_local_tts(safe_text, speed=speed, voice_override=req.voice_id)
+        except HTTPException as e:
+            logger.warning("Local TTS failed via %s: %s", LOCAL_TTS_URL, e.detail)
+            raise
+
+    if not GRADIUM_API_KEY:
+        raise HTTPException(status_code=500, detail="No TTS backend configured (set LOCAL_TTS_URL or GRADIUM_API_KEY)")
 
     try:
         headers = {
@@ -382,40 +528,10 @@ def tts(req: TTSRequest) -> Response:
                     last_error = f"TTS {resp.status_code}: {body or 'empty response'}"
                     continue
 
-                ctype = (resp.headers.get("content-type") or "").lower()
-                if "audio/wav" in ctype or "audio/" in ctype:
-                    return Response(content=resp.content, media_type="audio/wav")
-
-                # Some APIs may return JSON with base64 audio or an audio URL.
-                if "application/json" in ctype:
-                    try:
-                        data = resp.json()
-                    except ValueError:
-                        last_error = "TTS: invalid JSON"
-                        continue
-
-                    b64 = data.get("audio_base64") or data.get("audio")
-                    if isinstance(b64, str) and b64.strip():
-                        try:
-                            audio_bytes = base64.b64decode(b64)
-                        except Exception:
-                            last_error = "TTS: invalid base64 audio"
-                            continue
-                        return Response(content=audio_bytes, media_type="audio/wav")
-
-                    audio_url = data.get("audio_url")
-                    if isinstance(audio_url, str) and audio_url.startswith("http"):
-                        get_resp = requests.get(audio_url, timeout=20)
-                        if get_resp.status_code < 400:
-                            return Response(content=get_resp.content, media_type="audio/wav")
-                        last_error = f"TTS audio_url {get_resp.status_code}"
-                        continue
-
-                    msg = data.get("detail") or data.get("message") or data.get("error")
-                    last_error = f"TTS JSON without audio: {ascii_only(str(msg or 'unknown'))[:200]}"
-                    continue
-
-                last_error = f"TTS: unsupported format ({ctype or 'unknown'})"
+                audio_bytes, parse_error = _extract_audio_from_tts_http_response(resp)
+                if audio_bytes:
+                    return Response(content=audio_bytes, media_type="audio/wav")
+                last_error = parse_error
 
         raise HTTPException(status_code=502, detail=last_error)
     except HTTPException:
@@ -798,6 +914,22 @@ HTML_PAGE = """
       margin-top: 10px;
       align-items: center;
     }
+    .tts-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      align-items: center;
+    }
+    .tts-row select {
+      min-width: 220px;
+      max-width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--card-strong);
+      color: var(--text);
+      padding: 8px 10px;
+    }
     .mic-pill {
       display: inline-flex;
       align-items: center;
@@ -1016,31 +1148,14 @@ HTML_PAGE = """
               <div id="mic-state" class="mic-pill ready"><span class="dot"></span><span>Mic ready</span></div>
               <div id="mic-timer" class="mic-pill mic-timer"><span>00:00</span></div>
             </div>
+            <div class="tts-row">
+              <select id="pocket-voice-select" title="Pocket TTS voice">
+                <option value="">Pocket TTS voice: server default</option>
+              </select>
+              <button id="tts-test-btn" class="secondary" type="button">Test voice</button>
+            </div>
             <div style="height:10px"></div>
             <div id="ask-answer"></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-body">
-            <details class="audio-details">
-              <summary>
-                <span>Audio settings (Gradium)</span>
-                <span class="summary-right">Voice, speed, test</span>
-              </summary>
-              <div class="details-body">
-                <p class="section-note">These settings only affect the coach voice (TTS). API keys stay server-side.</p>
-                <div class="voice-grid">
-                  <select id="voice-black-select"></select>
-                  <select id="voice-speed-select"></select>
-                  <input id="voice-black-custom" type="text" placeholder="custom coach voice_id" style="display:none" />
-                </div>
-                <div class="voice-actions">
-                  <button id="voice-save-btn" class="secondary">Save voice</button>
-                  <button id="voice-test-btn">Test coach voice</button>
-                </div>
-              </div>
-            </details>
           </div>
         </div>
 
@@ -1082,35 +1197,19 @@ HTML_PAGE = """
     const micBtn = document.getElementById('mic-btn');
     const askBtn = document.getElementById('ask-btn');
     const askInput = document.getElementById('ask-input');
-    const voiceBlackSelect = document.getElementById('voice-black-select');
-    const voiceSpeedSelect = document.getElementById('voice-speed-select');
-    const voiceBlackCustomInput = document.getElementById('voice-black-custom');
-    const voiceSaveBtn = document.getElementById('voice-save-btn');
-    const voiceTestBtn = document.getElementById('voice-test-btn');
-    const VOICE_OPTIONS = [
-      { value: '', label: 'Server default' },
-      { value: 'YTpq7expH9539ERJ', label: 'Emma (en-US, feminine)' },
-      { value: 'LFZvm12tW_z0xfGo', label: 'Kent (en-US, masculine)' },
-      { value: 'jtEKaLYNn6iif5PR', label: 'Sydney (en-US, feminine)' },
-      { value: 'KWJiFWu2O9nMPYcR', label: 'John (en-US, masculine)' },
-      { value: 'ubuXFxVQwVYnZQhy', label: 'Eva (en-GB, feminine)' },
-      { value: 'm86j6D7UZpGzHsNu', label: 'Jack (en-GB, masculine)' },
-      { value: 'b35yykvVppLXyw_l', label: 'Elise (fr-FR, feminine)' },
-      { value: 'axlOaUiFyOZhy4nv', label: 'Leo (fr-FR, masculine)' },
-      { value: '-uP9MuGtBqAvEyxI', label: 'Mia (de-DE, feminine)' },
-      { value: '0y1VZjPabOBU3rWy', label: 'Maximilian (de-DE, masculine)' },
-      { value: 'B36pbz5_UoWn4BDl', label: 'Valentina (es-MX, feminine)' },
-      { value: 'xu7iJ_fn2ElcWp2s', label: 'Sergio (es-ES, masculine)' },
-      { value: 'pYcGZz9VOo4n2ynh', label: 'Alice (pt-BR, feminine)' },
-      { value: 'M-FvVo9c-jGR4PgP', label: 'Davi (pt-BR, masculine)' },
-      { value: '__custom__', label: 'Custom...' }
+    const pocketVoiceSelect = document.getElementById('pocket-voice-select');
+    const ttsTestBtn = document.getElementById('tts-test-btn');
+    const POCKET_TTS_VOICES = [
+      { value: '', label: 'Pocket TTS voice: server default' },
+      { value: 'alba', label: 'alba' },
+      { value: 'marius', label: 'marius' },
+      { value: 'javert', label: 'javert' },
+      { value: 'jean', label: 'jean' },
+      { value: 'fantine', label: 'fantine' },
+      { value: 'cosette', label: 'cosette' },
+      { value: 'eponine', label: 'eponine' },
+      { value: 'azelma', label: 'azelma' },
     ];
-    const SPEED_OPTIONS = [
-      { value: '1.0', label: 'Speed: normal' },
-      { value: '1.15', label: 'Speed: fast' },
-      { value: '1.3', label: 'Speed: very fast' },
-    ];
-
     const chess = new Chess();
     let selectedSquare = null;
     let pending = false;
@@ -1118,7 +1217,7 @@ HTML_PAGE = """
     let lastMoveSquares = { from: null, to: null };
     let mediaRecorder = null;
     let chunks = [];
-    let voiceSettings = { voice_id: '', speed: 1.0 };
+    let ttsSettings = { pocket_voice: '' };
     let coachState = { white_feedback: '', black_advice: '' };
     let coachHistory = [];
     let micTimerInterval = null;
@@ -1219,6 +1318,36 @@ HTML_PAGE = """
       void el.offsetWidth;
       el.classList.add('flash');
       setTimeout(() => el.classList.remove('flash'), 220);
+    }
+
+    function loadTTSSettings() {
+      try {
+        const raw = localStorage.getItem('pocket_tts_settings');
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.pocket_voice === 'string') {
+          ttsSettings.pocket_voice = parsed.pocket_voice;
+        }
+      } catch (_) {
+        // Keep defaults.
+      }
+    }
+
+    function saveTTSSettings() {
+      localStorage.setItem('pocket_tts_settings', JSON.stringify(ttsSettings));
+    }
+
+    function renderPocketVoiceSelect() {
+      if (!pocketVoiceSelect) return;
+      pocketVoiceSelect.innerHTML = '';
+      for (const opt of POCKET_TTS_VOICES) {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.label;
+        pocketVoiceSelect.appendChild(o);
+      }
+      const current = ttsSettings.pocket_voice || '';
+      pocketVoiceSelect.value = [...pocketVoiceSelect.options].some(o => o.value === current) ? current : '';
     }
 
     function legalMovesToUci() {
@@ -1368,98 +1497,6 @@ HTML_PAGE = """
       renderCoach();
     }
 
-    function loadVoiceSettings() {
-      try {
-        const raw = localStorage.getItem('gradium_voice_settings');
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed.voice_id === 'string') {
-          voiceSettings = {
-            voice_id: parsed.voice_id,
-            speed: Number(parsed.speed || 1.0) || 1.0,
-          };
-        } else if (parsed && parsed.black && typeof parsed.black.voice_id === 'string') {
-          // Backward compatibility with previous saved structure.
-          voiceSettings = {
-            voice_id: parsed.black.voice_id,
-            speed: Number(parsed.black.speed || 1.0) || 1.0,
-          };
-        }
-      } catch (_) {
-        // Keep defaults.
-      }
-    }
-
-    function renderVoiceSettings() {
-      renderVoiceSelect(voiceBlackSelect, voiceBlackCustomInput, voiceSettings.voice_id || '');
-      renderSpeedSelect();
-    }
-
-    function renderSpeedSelect() {
-      voiceSpeedSelect.innerHTML = '';
-      for (const opt of SPEED_OPTIONS) {
-        const o = document.createElement('option');
-        o.value = opt.value;
-        o.textContent = opt.label;
-        voiceSpeedSelect.appendChild(o);
-      }
-      const current = String(voiceSettings.speed || 1.0);
-      if ([...voiceSpeedSelect.options].some(o => o.value === current)) {
-        voiceSpeedSelect.value = current;
-      } else {
-        voiceSpeedSelect.value = '1.0';
-      }
-    }
-
-    function renderVoiceSelect(selectEl, customInputEl, currentVoiceId) {
-      selectEl.innerHTML = '';
-      const known = new Set(VOICE_OPTIONS.map(o => o.value));
-      for (const opt of VOICE_OPTIONS) {
-        const o = document.createElement('option');
-        o.value = opt.value;
-        o.textContent = opt.label;
-        selectEl.appendChild(o);
-      }
-      if (currentVoiceId && !known.has(currentVoiceId)) {
-        const customOpt = document.createElement('option');
-        customOpt.value = currentVoiceId;
-        customOpt.textContent = `Custom (${currentVoiceId.slice(0, 8)}...)`;
-        selectEl.insertBefore(customOpt, selectEl.lastElementChild);
-        selectEl.value = currentVoiceId;
-        customInputEl.style.display = 'none';
-      } else if (currentVoiceId && known.has(currentVoiceId)) {
-        selectEl.value = currentVoiceId;
-        customInputEl.style.display = 'none';
-      } else {
-        selectEl.value = '';
-        customInputEl.style.display = 'none';
-      }
-      customInputEl.value = currentVoiceId || '';
-    }
-
-    function readVoiceIdFromControls(selectEl, customInputEl) {
-      if (selectEl.value === '__custom__') return (customInputEl.value || '').trim();
-      return (selectEl.value || '').trim();
-    }
-
-    function onVoiceSelectChange(selectEl, customInputEl) {
-      if (selectEl.value === '__custom__') {
-        customInputEl.style.display = 'block';
-        customInputEl.focus();
-      } else {
-        customInputEl.style.display = 'none';
-      }
-    }
-
-    function saveVoiceSettings() {
-      voiceSettings = {
-        voice_id: readVoiceIdFromControls(voiceBlackSelect, voiceBlackCustomInput),
-        speed: Number(voiceSpeedSelect.value || '1.0') || 1.0,
-      };
-      localStorage.setItem('gradium_voice_settings', JSON.stringify(voiceSettings));
-      log('Voice settings saved');
-    }
-
     async function playTTS(text, color) {
       if (!audioToggle.checked || !text) return;
       try {
@@ -1469,8 +1506,7 @@ HTML_PAGE = """
           body: JSON.stringify({
             text,
             color,
-            voice_id: voiceSettings.voice_id || undefined,
-            speed: voiceSettings.speed,
+            voice_id: ttsSettings.pocket_voice || undefined
           })
         });
         if (!resp.ok) {
@@ -1510,7 +1546,7 @@ HTML_PAGE = """
           });
         });
       } catch (e) {
-        log(`Gradium TTS unavailable: ${e && e.message ? e.message : 'unknown error'}`);
+        log(`TTS unavailable: ${e && e.message ? e.message : 'unknown error'}`);
       }
     }
 
@@ -1676,15 +1712,14 @@ HTML_PAGE = """
     themeToggle.addEventListener('change', () => {
       setTheme(themeToggle.checked ? 'dark' : 'light');
     });
-    voiceBlackSelect.addEventListener('change', () => {
-      onVoiceSelectChange(voiceBlackSelect, voiceBlackCustomInput);
+    pocketVoiceSelect.addEventListener('change', () => {
+      ttsSettings.pocket_voice = pocketVoiceSelect.value || '';
+      saveTTSSettings();
+      log(`Pocket TTS voice: ${ttsSettings.pocket_voice || 'server default'}`);
     });
-    voiceSaveBtn.addEventListener('click', saveVoiceSettings);
-    voiceTestBtn.addEventListener('click', async () => {
-      saveVoiceSettings();
-      await playTTS('Coach voice test.', 'black');
+    ttsTestBtn.addEventListener('click', async () => {
+      await playTTS('Pocket TTS voice test.', 'black');
     });
-
     async function ensureRecorder() {
       if (mediaRecorder) return true;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -1790,8 +1825,8 @@ HTML_PAGE = """
     });
 
     setTheme(localStorage.getItem('chess_theme') || 'light');
-    loadVoiceSettings();
-    renderVoiceSettings();
+    loadTTSSettings();
+    renderPocketVoiceSelect();
     renderCoach();
     renderBoard();
     setMicState('ready', 'Mic ready');

@@ -1,0 +1,1 @@
+Moving your knight to a3 is a good idea to control more central squares and potentially support a future pawn advance like c2-c4. However, consider developing it to c3 first to immediately challenge Black's control over the center.

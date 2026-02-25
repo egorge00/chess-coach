@@ -1,0 +1,21 @@
+[project]
+name = "chess-coach-pipecat-poc"
+version = "0.1.0"
+description = "Pipecat POC for Chess Coach (isolated experiment)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "mistralai[realtime]>=1.0.0",
+  "pipecat-ai[local]>=0.0.9",
+  "python-dotenv>=1.0.1",
+  "requests>=2.32.0",
+  "uvicorn>=0.30.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

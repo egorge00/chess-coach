@@ -1,0 +1,1 @@
+Moving your queen to D3 is premature. Focus on developing your knights and bishops first.
