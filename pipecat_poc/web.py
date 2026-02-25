@@ -35,6 +35,7 @@ class RunRequest(BaseModel):
     chunk_ms: int = DEFAULT_CHUNK_MS
     target_delay_ms: int = DEFAULT_TARGET_DELAY_MS
     fen: str = ""
+    voice: str = ""
 
 
 class CoachCommentaryRequest(BaseModel):
@@ -45,6 +46,7 @@ class CoachCommentaryRequest(BaseModel):
 
 class SpeakRequest(BaseModel):
     text: str
+    voice: str = ""
 
 
 ALLOWED_MODES = {"voice-loop", "voice-turn", "mic-realtime", "doctor"}
@@ -113,10 +115,15 @@ def _build_cmd(req: RunRequest) -> list[str]:
 
 def _run_subprocess(req: RunRequest) -> dict[str, Any]:
     cmd = _build_cmd(req)
+    env = os.environ.copy()
+    voice = (req.voice or "").strip()
+    if voice:
+        env["POCKET_TTS_VOICE"] = voice
+        env["LOCAL_TTS_VOICE"] = voice
     proc = subprocess.run(
         cmd,
         cwd=str(ROOT_DIR),
-        env=os.environ.copy(),
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -217,7 +224,7 @@ def _call_mistral_chat(messages: list[dict[str, str]], *, model: str, temperatur
     return text[:400]
 
 
-def _pocket_tts_speak_bytes(text: str) -> bytes:
+def _pocket_tts_speak_bytes(text: str, voice_override: str | None = None) -> bytes:
     text = (text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="empty text")
@@ -225,7 +232,7 @@ def _pocket_tts_speak_bytes(text: str) -> bytes:
     if not pocket_url.endswith("/tts"):
         pocket_url = pocket_url + "/tts"
     form = {"text": text}
-    voice = os.getenv("POCKET_TTS_VOICE", os.getenv("LOCAL_TTS_VOICE", "")).strip()
+    voice = (voice_override or "").strip() or os.getenv("POCKET_TTS_VOICE", os.getenv("LOCAL_TTS_VOICE", "")).strip()
     if voice:
         form["voice_url"] = voice
     try:
@@ -287,6 +294,7 @@ def index() -> str:
     button {{ border:0; border-radius:12px; padding:10px 13px; font-weight:700; cursor:pointer; color:#fff; background:linear-gradient(180deg,var(--accent),var(--accent-2)); box-shadow:0 8px 18px rgba(109,117,93,.24); }}
     button.secondary {{ background:var(--card-strong); color:var(--text); border:1px solid var(--line); box-shadow:none; }}
     button:disabled {{ opacity:.55; cursor:not-allowed; box-shadow:none; }}
+    select {{ width:100%; border-radius:12px; border:1px solid var(--line); background:var(--card-strong); color:var(--text); padding:10px 12px; font:inherit; }}
     .board-controls {{ margin-top:12px; }}
     .control-row {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
     .control-group {{ border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.48); padding:10px; display:grid; gap:6px; }}
@@ -341,6 +349,8 @@ def index() -> str:
     .param-card b {{ display:block; font-size:12px; color:#6b5946; text-transform:uppercase; }} .param-card span {{ display:block; margin-top:4px; font-size:14px; }} .param-card small {{ display:block; color:var(--muted); font-size:11px; margin-top:4px; }}
     .file-list {{ border:1px solid var(--line); background:rgba(255,255,255,.4); border-radius:12px; padding:10px; max-height:180px; overflow:auto; font-size:13px; margin-top:8px; }}
     .file-list ul {{ margin:0; padding-left:18px; }} .file-list li {{ margin:4px 0; }}
+    .mini-actions {{ display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }}
+    .mini-actions button {{ flex:1 1 120px; }}
     .log-shell {{ background:#17120d; color:#efe7db; border-radius:16px; border:1px solid rgba(255,255,255,.08); padding:14px; min-height:220px; max-height:420px; overflow:auto; }}
     pre {{ margin:0; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.35; }}
     @media (max-width:980px) {{ .layout{{grid-template-columns:1fr;}} .app-header{{grid-template-columns:1fr;}} .status-strip{{justify-content:flex-start;}} .board-meta{{grid-template-columns:1fr;}} .control-row{{grid-template-columns:1fr;}} .param-grid{{grid-template-columns:1fr;}} }}
@@ -405,6 +415,26 @@ def index() -> str:
 
         <div class=\"card subtle\"><div class=\"card-body\">
           <div class=\"card-header\"><h2 class=\"card-title\">Settings and Logs</h2></div>
+          <details class=\"slim\" open>
+            <summary><span>Pocket TTS Voice</span><span style=\"color:#6c5c49;font-size:12px;\">Choose & test</span></summary>
+            <div class=\"details-body\">
+              <label for=\"pocket-voice\" class=\"section-note\" style=\"display:block;margin-top:10px;\">Voice preset (used for move commentary and live ask replies)</label>
+              <select id=\"pocket-voice\">
+                <option value=\"\">Server default ({html.escape(cfg['pocket_tts_voice'])})</option>
+                <option value=\"alba\">alba</option>
+                <option value=\"marius\">marius</option>
+                <option value=\"javert\">javert</option>
+                <option value=\"jean\">jean</option>
+                <option value=\"fantine\">fantine</option>
+                <option value=\"cosette\">cosette</option>
+                <option value=\"eponine\">eponine</option>
+                <option value=\"azelma\">azelma</option>
+              </select>
+              <div class=\"mini-actions\">
+                <button id=\"voice-test-btn\" class=\"secondary\" type=\"button\">Test voice</button>
+              </div>
+            </div>
+          </details>
           <details class=\"slim\">
             <summary><span>Pipecat Settings</span><span style=\"color:#6c5c49;font-size:12px;\">Latency, chunk, models</span></summary>
             <div class=\"details-body\">
@@ -439,6 +469,7 @@ def index() -> str:
     const FILES = ['a','b','c','d','e','f','g','h'];
     const HISTORY_KEY = 'pipecat_stream_history_v1';
     const LAST_STEM_KEY = 'pipecat_stream_last_stem_v1';
+    const POCKET_VOICE_KEY = 'pipecat_stream_pocket_voice_v1';
     const SERVER_BOOT_ID = '{SERVER_BOOT_ID}';
     const SERVER_BOOT_TS = Number(SERVER_BOOT_ID || '0');
     const SERVER_BOOT_KEY = 'pipecat_stream_server_boot_v1';
@@ -459,6 +490,8 @@ def index() -> str:
     const audioPlayerEl = document.getElementById('audio-player');
     const runStatusInlineEl = document.getElementById('run-status-inline');
     const voiceLoopBtnEl = document.getElementById('voice-loop-btn');
+    const pocketVoiceEl = document.getElementById('pocket-voice');
+    const voiceTestBtnEl = document.getElementById('voice-test-btn');
     const voiceOrbEl = document.getElementById('voice-orb');
     const voiceOrbLabelEl = document.getElementById('voice-orb-label');
     const voiceOrbSubEl = document.getElementById('voice-orb-sub');
@@ -479,6 +512,18 @@ def index() -> str:
       if (voiceOrbEl) voiceOrbEl.className = 'voice-orb ' + (mode || 'idle');
       if (voiceOrbLabelEl) voiceOrbLabelEl.textContent = label || 'Coach idle';
       if (voiceOrbSubEl) voiceOrbSubEl.textContent = sub || '';
+    }}
+    function currentPocketVoice() {{
+      return (pocketVoiceEl && pocketVoiceEl.value ? String(pocketVoiceEl.value) : '').trim();
+    }}
+    function loadPocketVoicePreference() {{
+      if (!pocketVoiceEl) return;
+      const saved = localStorage.getItem(POCKET_VOICE_KEY) || '';
+      if ([...pocketVoiceEl.options].some(o => o.value === saved)) pocketVoiceEl.value = saved;
+    }}
+    function savePocketVoicePreference() {{
+      if (!pocketVoiceEl) return;
+      localStorage.setItem(POCKET_VOICE_KEY, currentPocketVoice());
     }}
     function setAskButtonUi() {{
       if (!voiceLoopBtnEl) return;
@@ -656,7 +701,7 @@ def index() -> str:
       const res = await fetch('/speak', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ text: clean }}),
+        body: JSON.stringify({{ text: clean, voice: currentPocketVoice() }}),
       }});
       if (!res.ok) {{
         let msg = 'TTS failed';
@@ -867,7 +912,7 @@ def index() -> str:
     }}
 
     async function runVoiceLoopOnce() {{
-      const body = {{ ...FIXED_RUN, fen: game ? game.fen() : fallbackFen() }};
+      const body = {{ ...FIXED_RUN, fen: game ? game.fen() : fallbackFen(), voice: currentPocketVoice() }};
       setChip(pendingChipEl, 'Coach running', 'busy');
       setPill(micStateEl, 'Mic open', 'busy');
       setPill(pipeStateEl, 'Voice loop running', 'busy');
@@ -1061,10 +1106,26 @@ def index() -> str:
       logEl.textContent = 'Conversation reset (UI history only).';
     }}
 
+    async function testPocketVoice() {{
+      if (liveAskActive || turnCoachingBusy) return;
+      const prev = voiceTestBtnEl ? voiceTestBtnEl.textContent : '';
+      if (voiceTestBtnEl) {{ voiceTestBtnEl.disabled = true; voiceTestBtnEl.textContent = 'Testing...'; }}
+      try {{
+        await speakCommentary('This is your chess coach voice test.');
+      }} catch (e) {{
+        setStatus('Voice test failed: ' + (e && e.message ? e.message : e));
+      }} finally {{
+        if (voiceTestBtnEl) {{ voiceTestBtnEl.disabled = false; voiceTestBtnEl.textContent = prev || 'Test voice'; }}
+      }}
+    }}
+
     document.getElementById('voice-loop-btn').addEventListener('click', toggleAskCoachLive);
     document.getElementById('new-game-btn').addEventListener('click', resetGame);
+    if (pocketVoiceEl) pocketVoiceEl.addEventListener('change', savePocketVoicePreference);
+    if (voiceTestBtnEl) voiceTestBtnEl.addEventListener('click', testPocketVoice);
 
     clearUiCacheForNewServerBoot();
+    loadPocketVoicePreference();
     setPill(micStateEl, 'Mic ready', 'ready');
     setPill(pipeStateEl, 'Pipeline idle', '');
     setPill(audioStateEl, 'No audio yet', '');
@@ -1129,7 +1190,7 @@ def coach_commentary(req: CoachCommentaryRequest) -> dict[str, str]:
 
 @APP.post('/speak')
 def speak(req: SpeakRequest) -> Response:
-    audio = _pocket_tts_speak_bytes(req.text)
+    audio = _pocket_tts_speak_bytes(req.text, (req.voice or "").strip() or None)
     return Response(content=audio, media_type="audio/wav")
 
 

@@ -1,6 +1,6 @@
 # Chess Coach
 
-A local voice-powered chess coach: you play White, the coach comments on your move, plays Black's response, then gives you a simple plan for the next move.
+A voice-powered chess coach: you play White, the coach comments on your move, plays Black's response, then gives you a simple plan for the next move.
 
 ## Why this project
 
@@ -16,7 +16,7 @@ I wanted a fast prototype for chess coaching with:
 - Coach feedback on your last move
 - Black reply selected by an LLM
 - Clear next-move advice
-- Free-form questions to the coach (text or microphone)
+- Free-form follow-up questions to the coach (microphone)
 - Audio playback of coach responses (Pocket TTS by Kyutai)
 
 ## Screenshots
@@ -32,7 +32,8 @@ The main coaching screen: interactive board, move-by-move feedback, voice contro
 - **Frontend**: Single-page HTML / CSS / vanilla JS
 - **Chess logic**: `chess.js`
 - **Realtime voice orchestration**: Pipecat
-- **LLM / STT**: Mistral + Voxtral (chat + transcription)
+- **LLM**: Mistral (`mistral-small-latest`)
+- **STT (streaming)**: Voxtral (`voxtral-mini-transcribe-realtime-2602`)
 - **TTS**: Pocket TTS (Kyutai, local)
 
 ## Architecture
